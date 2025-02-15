@@ -3,6 +3,12 @@ import aiohttp
 from traitlets import List, Unicode, default
 from oauthenticator.generic import GenericOAuthenticator
 
+import os
+from datetime import datetime
+import sqlalchemy
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
+
 
 class CanvasOAuthenticator(GenericOAuthenticator):
     """
@@ -229,6 +235,79 @@ class CanvasOAuthenticator(GenericOAuthenticator):
         if self.strip_email_domain and username.endswith("@" + self.strip_email_domain):
             return username.split("@")[0]
         return username
+    
+
+
+    async def update_user_database(self, user):
+        """
+        Connect to the cloudsql database.
+        Create the table if it does not already exist.
+        Insert/update the authenticated user's last login info.
+        """
+        # Get the database connection details from environment variables
+        db_user = os.getenv("DB_USER")
+        db_password = os.getenv("DB_PASSWORD")
+        db_name = os.getenv("DB_NAME")
+        db_host = os.getenv("DB_HOST")
+        db_port = os.getenv("DB_PORT")
+        pod_namespace = os.getenv("POD_NAMESPACE")
+
+        # Setup the database connection URI for PostgreSQL
+        DATABASE_URL = f"postgresql+asyncpg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+
+        # Get table name
+        hub, prod_or_staging = pod_namespace.split('-')
+        table_name = "users_" + hub + "_" + prod_or_staging
+
+        # Create SQLAlchemy async engine
+        engine = create_async_engine(DATABASE_URL, echo=True, future=True)
+
+        async_session = sessionmaker(
+            engine, class_=AsyncSession, expire_on_commit=False
+        )
+
+        async with async_session() as session:
+            async with session.begin():
+                try:
+                    # Create the table if not exists
+                    await session.execute(
+                        sqlalchemy.text(
+                            f"""
+                            CREATE TABLE IF NOT EXISTS {table_name} (
+                                id SERIAL PRIMARY KEY, 
+                                username VARCHAR(255) NOT NULL, 
+                                last_login TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                            );
+                            """
+                        )
+                    )
+
+                    # Check if the username exists
+                    check_stmt = sqlalchemy.text(
+                        f"SELECT COUNT(1) FROM {table_name} WHERE username = :username"
+                    )
+                    result = await session.execute(check_stmt, {"username": self.normalize_username(user.name)})
+                    result_count = result.scalar()
+
+                    current_time = datetime.now()
+
+                    if result_count > 0:
+                        # Username exists, update the last login timestamp
+                        update_stmt = sqlalchemy.text(
+                            f"UPDATE {table_name} SET last_login = :last_login WHERE username = :username"
+                        )
+                        await session.execute(update_stmt, {"username": self.normalize_username(user.name), "last_login": current_time})
+                    else:
+                        # Username does not exist, insert a new entry
+                        insert_stmt = sqlalchemy.text(
+                            f"INSERT INTO {table_name} (username, last_login) VALUES (:username, :last_login)"
+                        )
+                        await session.execute(insert_stmt, {"username": self.normalize_username(user.name), "last_login": current_time})
+
+                except Exception as e:
+                    print(f"An error occurred while updating the table {table_name}: {e}")
+
+
 
     async def pre_spawn_start(self, user, spawner):
         """Pass oauth data to spawner via OAUTH2_ prefixed env variables."""
@@ -237,6 +316,10 @@ class CanvasOAuthenticator(GenericOAuthenticator):
             return
         if "access_token" in auth_state:
             spawner.environment["OAUTH2_ACCESS_TOKEN"] = auth_state["access_token"]
+        
+        # updating the database
+        await self.update_user_database(user)
+
         # others are lti_user_id, id, integration_id
         if "oauth_user" in auth_state:
             for k in ["login_id", "name", "sortable_name", "primary_email"]:
