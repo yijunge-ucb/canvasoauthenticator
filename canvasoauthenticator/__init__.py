@@ -4,10 +4,7 @@ from traitlets import List, Unicode, default
 from oauthenticator.generic import GenericOAuthenticator
 
 import os
-from datetime import datetime
-import sqlalchemy
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+
 
 
 class CanvasOAuthenticator(GenericOAuthenticator):
@@ -236,6 +233,64 @@ class CanvasOAuthenticator(GenericOAuthenticator):
             return username.split("@")[0]
         return username
     
+    async def connect_to_database(self, user, password, dbname, host, port):
+        """Connect to the PostgreSQL database asynchronously."""
+        try:
+            # Establish connection using asyncpg
+            connection = await asyncpg.connect(
+                user=user,
+                password=password,
+                database=dbname,
+                host=host,
+                port=port
+            )
+            print(f"Connected to database {dbname}.")
+            return connection
+        except Exception as e:
+            print(f"Error: Unable to connect to the database. {e}")
+            return None
+
+    async def create_table(self, connection, table_name):
+        """Create the table if it does not exist."""
+        query = f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            id SERIAL PRIMARY KEY, 
+            username VARCHAR(255) NOT NULL, 
+            last_login TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        try:
+            await connection.execute(query)
+            print(f"Table '{table_name}' created or already exists.")
+        except Exception as e:
+            print(f"Error creating table: {e}")
+
+    async def insert_or_update_user(self, connection, table_name, username):
+        """Insert a user or update if the user exists."""
+        # First, check if the user already exists in the table
+        check_query = f"SELECT COUNT(*) FROM {table_name} WHERE username = $1;"
+        result = await connection.fetchval(check_query, username)
+
+        if result == 0:
+            # If the user does not exist, insert a new user
+            insert_query = f"INSERT INTO {table_name} (username) VALUES ($1) RETURNING id;"
+            new_user_id = await connection.fetchval(insert_query, username)
+            print(f"Inserted new user with ID: {new_user_id}")
+        else:
+            # If the user exists, update the last_login field
+            update_query = f"UPDATE {table_name} SET last_login = CURRENT_TIMESTAMP WHERE username = $1;"
+            await connection.execute(update_query, username)
+            print(f"Updated last login for user: {username}")
+    
+    async def print_all_entries(self, connection, table_name):
+        """Print out all the entries in the table."""
+        query = f"SELECT * FROM {table_name};"
+        rows = await connection.fetch(query)
+        
+        print(f"Entries in table '{table_name}':")
+        for row in rows:
+            print(dict(row))
+
 
 
     async def update_user_database(self, user):
@@ -252,61 +307,29 @@ class CanvasOAuthenticator(GenericOAuthenticator):
         db_port = os.getenv("DB_PORT")
         pod_namespace = os.getenv("POD_NAMESPACE")
 
-        # Setup the database connection URI for PostgreSQL
-        DATABASE_URL = f"postgresql+asyncpg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+        print("JupyterHub is starting! Welcome to the JupyterHub server.")
+        print("Trying to connect to the Cloud Postgres database.")
+        print(f"Username: {user.name}")
 
         # Get table name
         hub, prod_or_staging = pod_namespace.split('-')
         table_name = "users_" + hub + "_" + prod_or_staging
 
-        # Create SQLAlchemy async engine
-        engine = create_async_engine(DATABASE_URL, echo=True, future=True)
+        connection = await self.connect_to_database(db_user, db_password, db_name, db_host, db_port)
+        if connection is None:
+            return  # Exit if connection failed
+    
+        #  Create the table if it doesn't exist
+        await self.create_table(connection, table_name)
+    
+        #  Insert or update user
+        await self.insert_or_update_user(connection, table_name, self.normalize_username(user.name))
+    
+        # Print all entries in the table
+        await self.print_all_entries(connection, table_name)
 
-        async_session = sessionmaker(
-            engine, class_=AsyncSession, expire_on_commit=False
-        )
-
-        async with async_session() as session:
-            async with session.begin():
-                try:
-                    # Create the table if not exists
-                    await session.execute(
-                        sqlalchemy.text(
-                            f"""
-                            CREATE TABLE IF NOT EXISTS {table_name} (
-                                id SERIAL PRIMARY KEY, 
-                                username VARCHAR(255) NOT NULL, 
-                                last_login TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                            );
-                            """
-                        )
-                    )
-
-                    # Check if the username exists
-                    check_stmt = sqlalchemy.text(
-                        f"SELECT COUNT(1) FROM {table_name} WHERE username = :username"
-                    )
-                    result = await session.execute(check_stmt, {"username": self.normalize_username(user.name)})
-                    result_count = result.scalar()
-
-                    current_time = datetime.now()
-
-                    if result_count > 0:
-                        # Username exists, update the last login timestamp
-                        update_stmt = sqlalchemy.text(
-                            f"UPDATE {table_name} SET last_login = :last_login WHERE username = :username"
-                        )
-                        await session.execute(update_stmt, {"username": self.normalize_username(user.name), "last_login": current_time})
-                    else:
-                        # Username does not exist, insert a new entry
-                        insert_stmt = sqlalchemy.text(
-                            f"INSERT INTO {table_name} (username, last_login) VALUES (:username, :last_login)"
-                        )
-                        await session.execute(insert_stmt, {"username": self.normalize_username(user.name), "last_login": current_time})
-
-                except Exception as e:
-                    print(f"An error occurred while updating the table {table_name}: {e}")
-
+        # Close the connection
+        await connection.close()
 
 
     async def pre_spawn_start(self, user, spawner):
