@@ -335,13 +335,14 @@ class CanvasOAuthenticator(GenericOAuthenticator):
     async def pre_spawn_start(self, user, spawner):
         """Pass oauth data to spawner via OAUTH2_ prefixed env variables."""
         auth_state = yield user.get_auth_state()
+
+        # updating the database
+        await self.update_user_database(user)
+
         if not auth_state:
             return
         if "access_token" in auth_state:
             spawner.environment["OAUTH2_ACCESS_TOKEN"] = auth_state["access_token"]
-        
-        # updating the database
-        await self.update_user_database(user)
 
         # others are lti_user_id, id, integration_id
         if "oauth_user" in auth_state:
