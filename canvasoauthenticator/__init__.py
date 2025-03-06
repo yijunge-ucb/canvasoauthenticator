@@ -7,7 +7,7 @@ import os
 
 
 
-class CanvasOAuthenticator(GenericOAuthenticator):
+class CustomOAuthenticator(GenericOAuthenticator):
     """
     Canvas OAuth2 based authenticator for JupyterHub.
 
