@@ -223,7 +223,12 @@ class CanvasOAuthenticator(GenericOAuthenticator):
             self_group_names = self.groups_from_canvas_groups(self_groups)
 
             user["groups"] = course_group_names + self_group_names
-
+        if user:
+            self.log.debug("debugging: trying to update database")
+            self.log.info("info: trying to update database")
+            self.log.warning("warning: trying to update database")
+            # updating the database
+            await self.update_user_database(user)
         return user
 
     def normalize_username(self, username):
@@ -334,18 +339,8 @@ class CanvasOAuthenticator(GenericOAuthenticator):
 
     async def pre_spawn_start(self, user, spawner):
         """Pass oauth data to spawner via OAUTH2_ prefixed env variables."""
-
-        self.log.debug("debugging: trying to update database")
-        self.log.info("info: trying to update database")
-        self.log.warning("warning: trying to update database")
         auth_state = yield user.get_auth_state()
 
-        self.log.debug("debugging: trying to update database")
-        self.log.info("info: trying to update database")
-        self.log.warning("warning: trying to update database")
-
-        # updating the database
-        await self.update_user_database(user)
 
         if not auth_state:
             return
