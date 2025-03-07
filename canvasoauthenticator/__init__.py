@@ -334,10 +334,10 @@ class CanvasOAuthenticator(GenericOAuthenticator):
 
     async def pre_spawn_start(self, user, spawner):
         """Pass oauth data to spawner via OAUTH2_ prefixed env variables."""
-        self.log.debug("before get auth debugging: trying to update database")
-        self.log.info("before get auth  info: trying to update database")
-        self.log.warning("before get auth warning: trying to update database")
 
+        self.log.debug("debugging: trying to update database")
+        self.log.info("info: trying to update database")
+        self.log.warning("warning: trying to update database")
         auth_state = yield user.get_auth_state()
 
         self.log.debug("debugging: trying to update database")
