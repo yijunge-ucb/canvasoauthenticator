@@ -207,25 +207,19 @@ class CanvasOAuthenticator(GenericOAuthenticator):
     async def authenticate(self, handler, data=None):
         """Augment base user auth info with course info."""
         user = await super().authenticate(handler, data)
-        
-        self.log.error(f'Error: user is {user}')
-        self.log.error(f'Error: auth_state is {user.get_auth_state()}')
-        self.log.info(f'INFO: user is {user}')
-        self.log.info(f'INFO: auth_state is {user.get_auth_state()}')
-        self.log.warning(f'Warning: user is {user}')
-        self.log.warning(f'Warning: auth_state is {user.get_auth_state()}')
-        self.log.debug(f'Error: user is {user}')
-        self.log.debug(f'Error: auth_state is {user.get_auth_state()}')
 
-      
+        self.log.error(f"Error: user is {user}")
+        self.log.warning(f"Warning: user is {user}")
+        self.log.info(f"INFO: user is {user}")
+        self.log.debug(f"Error: user is {user}")
+
         auth_state = {
-            'access_token': user.get('access_token'),
-            'refresh_token': user.get('refresh_token'),
-            'token_response': user.get('token_response', {}),
-            'oauth_user': user.get('oauth_user', {})
+            "access_token": user.get("access_token"),
+            "refresh_token": user.get("refresh_token"),
+            "token_response": user.get("token_response", {}),
+            "oauth_user": user.get("oauth_user", {}),
         }
-        user['auth_state'] = auth_state
-        
+        user["auth_state"] = auth_state
 
         access_token = user["auth_state"]["access_token"]
 
@@ -240,7 +234,7 @@ class CanvasOAuthenticator(GenericOAuthenticator):
             self_group_names = self.groups_from_canvas_groups(self_groups)
 
             user["groups"] = course_group_names + self_group_names
-        
+
         return user
 
     def normalize_username(self, username):
@@ -252,11 +246,11 @@ class CanvasOAuthenticator(GenericOAuthenticator):
 
     async def pre_spawn_start(self, user, spawner):
         """Pass oauth data to spawner via OAUTH2_ prefixed env variables."""
-        self.log.info(f'INFO: user is {user}')
-        self.log.warning(f'Warning: user is {user}')
-        self.log.debug(f'Error: user is {user}')
-        self.log.error(f'Error: user is {user}')
-        
+        self.log.info(f"INFO: user is {user}")
+        self.log.warning(f"Warning: user is {user}")
+        self.log.debug(f"Error: user is {user}")
+        self.log.error(f"Error: user is {user}")
+
         auth_state = yield user.get_auth_state()
         if not auth_state:
             return
