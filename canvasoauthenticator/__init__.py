@@ -221,6 +221,7 @@ class CanvasOAuthenticator(GenericOAuthenticator):
 
             user["groups"] = course_group_names + self_group_names
 
+        user['auth_state'] = user['auth_state']['oauth_user']['login_id']
         return user
 
     def normalize_username(self, username):
@@ -232,6 +233,12 @@ class CanvasOAuthenticator(GenericOAuthenticator):
 
     async def pre_spawn_start(self, user, spawner):
         """Pass oauth data to spawner via OAUTH2_ prefixed env variables."""
+        self.log.info(f'INFO: user is {user}')
+        self.log.info(f'INFO: auth_state is {user.get_auth_state()}')
+        self.log.warning(f'Warning: user is {user}')
+        self.log.warning(f'Warning: auth_state is {user.get_auth_state()}')
+        self.log.error(f'Error: user is {user}')
+        self.log.error(f'Error: auth_state is {user.get_auth_state()}')
         auth_state = yield user.get_auth_state()
         if not auth_state:
             return
