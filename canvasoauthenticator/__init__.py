@@ -209,6 +209,7 @@ class CanvasOAuthenticator(GenericOAuthenticator):
         user = await super().authenticate(handler, data)
         old_auth_state = user.get("auth_state")
         auth_state = {
+            "access_token": old_auth_state.get("access_token", {}),
             "oauth_user": old_auth_state.get("oauth_user", {}),
         }
         user["auth_state"] = auth_state
