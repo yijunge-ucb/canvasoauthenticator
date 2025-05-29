@@ -105,32 +105,49 @@ class CanvasOAuthenticator(GenericOAuthenticator):
             # https://github.com/instructure/canvas-lms/blob/release/2022-08-03.12/spec/controllers/oauth2_provider_controller_spec.rb#L520
             "replace_tokens": 1,
         }
-
+        
+    
     async def fetch_all_pages(self, url, access_token, token_type):
-        """Helper to fetch all paginated Canvas API results"""
+        """Fetch all paginated Canvas API results using httpfetch (which returns parsed JSON)."""
         all_data = []
 
         while url:
-            resp = await self.httpfetch(
-                url,
-                f"Fetching paginated Canvas data from: {url}",
-                method="GET",
-                headers=self.build_userdata_request_headers(access_token, token_type),
-                validate_cert=self.validate_server_cert,
-            )
-            data = json.loads(resp.body.decode("utf-8"))
-            all_data.extend(data)
+            headers = self.build_userdata_request_headers(access_token, token_type)
 
-            # Parse Link headers for pagination
-            link_header = resp.headers.get("Link", "")
+            resp_data = await self.httpfetch(
+                url,
+                label=f"Fetching paginated Canvas data from: {url}",
+                method="GET",
+                headers=headers,
+                validate_cert=self.validate_server_cert,
+                parse_json=True,  
+            )
+
+            if isinstance(resp_data, list):
+                all_data.extend(resp_data)
+            elif resp_data:
+                all_data.append(resp_data)
+
+            raw_resp = await self.httpfetch(
+                url,
+                label="Inspecting Link headers for pagination",
+                method="GET",
+                headers=headers,
+                validate_cert=self.validate_server_cert,
+                parse_json=False,
+            )
+
+            link_header = raw_resp.headers.get("Link", "")
             next_url = None
             for part in link_header.split(","):
                 if 'rel="next"' in part:
                     next_url = part.split(";")[0].strip(" <>")
                     break
+
             url = next_url
 
         return all_data
+
 
     async def token_to_user(self, token_info):
         """
@@ -174,14 +191,13 @@ class CanvasOAuthenticator(GenericOAuthenticator):
         if self.userdata_token_method == "url":
             url = url_concat(url, dict(access_token=access_token))
 
-        user_resp = await self.httpfetch(
+        user_info = await self.httpfetch(
             url,
             "Fetching user info...",
             method="GET",
             headers=self.build_userdata_request_headers(access_token, token_type),
             validate_cert=self.validate_server_cert,
         )
-        user_info = json.loads(user_resp.body.decode("utf-8"))
         
         self_groups = await self.fetch_all_pages(self.groups_url, access_token, token_type)
         courses = await self.fetch_all_pages(self.courses_url, access_token, token_type)
