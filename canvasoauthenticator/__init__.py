@@ -2,6 +2,8 @@ import aiohttp
 
 from traitlets import List, Unicode, default
 from oauthenticator.generic import GenericOAuthenticator
+from urllib.parse import urlencode
+from tornado import web
 
 
 class CanvasOAuthenticator(GenericOAuthenticator):
@@ -100,12 +102,42 @@ class CanvasOAuthenticator(GenericOAuthenticator):
             "replace_tokens": 1,
         }
 
-    async def get_canvas_items(self, token, url):
+    async def get_refresh_token(self, params):
+        """
+        Makes a "POST" request to `self.token_url`, with the parameters received as argument.
+
+        Returns:
+            the JSON response to the `token_url` the request as described in
+            https://www.rfc-editor.org/rfc/rfc6749#section-5.1
+
+        Called by :meth:`.authenticate` and :meth:`.refresh_user`.
+        """
+
+        token_info = await self.httpfetch(
+            self.token_url,
+            method="POST",
+            headers=self.build_token_info_request_headers(),
+            body=urlencode(params).encode("utf-8"),
+            validate_cert=self.validate_server_cert,
+        )
+
+        if "error_description" in token_info:
+            raise web.HTTPError(
+                403,
+                f'An access token was not returned: {token_info["error_description"]}',
+            )
+        elif "access_token" not in token_info:
+            raise web.HTTPError(500, f"Bad response: {token_info}")
+
+        return token_info
+
+    async def get_canvas_items(self, access_token, url):
         """
         Get paginated items from Canvas.
         https://canvas.instructure.com/doc/api/file.pagination.html
         """
-        headers = dict(Authorization=f"Bearer {token}")
+
+        headers = dict(Authorization=f"Bearer {access_token}")
         data = []
 
         async with aiohttp.ClientSession() as session:
@@ -114,14 +146,15 @@ class CanvasOAuthenticator(GenericOAuthenticator):
                     raise Exception(
                         f"error fetching items {url} -- {r.status} -- {r.text()}"
                     )
+
                 data = await r.json()
                 if "next" in r.links.keys():
                     url = r.links["next"]["url"]
-                    data += await self.get_canvas_items(token, url)
+                    data += await self.get_canvas_items(access_token, url)
 
         return data
 
-    async def get_courses(self, token):
+    async def get_courses(self, access_token):
         """
         Get list of active courses for the current user.
 
@@ -129,7 +162,7 @@ class CanvasOAuthenticator(GenericOAuthenticator):
         """
         url = f"{self.canvas_url}/api/v1/courses"
 
-        data = await self.get_canvas_items(token, url)
+        data = await self.get_canvas_items(access_token, url)
 
         return data
 
@@ -220,7 +253,18 @@ class CanvasOAuthenticator(GenericOAuthenticator):
         auth_model = await super().update_auth_model(auth_model)
 
         access_token = auth_model["auth_state"]["access_token"]
-        courses = await self.get_courses(access_token)
+
+        refresh_token = auth_model["auth_state"]["refresh_token"]
+
+        refresh_token_params = self.build_refresh_token_request_params(refresh_token)
+        token_info = await self.get_refresh_token(refresh_token_params)
+        new_access_token = token_info.get("access_token")
+
+        if not new_access_token:
+            self.log.error("Failed to refresh access token.")
+            raise web.HTTPError(500, "Failed to refresh access token.")
+
+        courses = await self.get_courses(new_access_token)
 
         # Preserve courses in auth_state for later use by the spawner
         auth_model["auth_state"]["courses"] = courses
@@ -228,11 +272,13 @@ class CanvasOAuthenticator(GenericOAuthenticator):
         if self.manage_groups:
             course_group_names = self.groups_from_canvas_courses(courses)
 
-            self_groups = await self.get_self_groups(access_token)
+            self_groups = await self.get_self_groups(new_access_token)
             self_group_names = self.groups_from_canvas_groups(self_groups)
 
             groups = course_group_names + self_group_names
             auth_model["auth_state"][self.auth_state_groups_key] = groups
+        auth_model["auth_state"]["access_token"] = new_access_token
+        auth_model["auth_state"]["token_response"]["access_token"] = new_access_token
         return auth_model
 
     def normalize_username(self, username):
