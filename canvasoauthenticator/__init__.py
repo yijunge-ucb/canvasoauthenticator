@@ -2,9 +2,11 @@ import aiohttp
 
 from traitlets import List, Unicode, default
 from oauthenticator.generic import GenericOAuthenticator
-from urllib.parse import urlencode
 from tornado import web
-
+from tornado.httputil import url_concat
+from inspect import isawaitable
+import jwt
+import json
 
 class CanvasOAuthenticator(GenericOAuthenticator):
     """
@@ -93,6 +95,8 @@ class CanvasOAuthenticator(GenericOAuthenticator):
 
         self.token_url = f"{self.canvas_url}login/oauth2/token"
         self.userdata_url = f"{self.canvas_url}api/v1/users/self/profile"
+        self.groups_url = f"{self.canvas_url}api/v1/users/self/groups"
+        self.courses_url = f"{self.canvas_url}api/v1/courses"
 
         self.extra_params = {
             "client_id": self.client_id,
@@ -102,81 +106,96 @@ class CanvasOAuthenticator(GenericOAuthenticator):
             "replace_tokens": 1,
         }
 
-    async def get_refresh_token(self, params):
+    async def fetch_all_pages(self, url, access_token, token_type):
+        """Helper to fetch all paginated Canvas API results"""
+        all_data = []
+
+        while url:
+            resp = await self.httpfetch(
+                url,
+                f"Fetching paginated Canvas data from: {url}",
+                method="GET",
+                headers=self.build_userdata_request_headers(access_token, token_type),
+                validate_cert=self.validate_server_cert,
+            )
+            data = json.loads(resp.body.decode("utf-8"))
+            all_data.extend(data)
+
+            # Parse Link headers for pagination
+            link_header = resp.headers.get("Link", "")
+            next_url = None
+            for part in link_header.split(","):
+                if 'rel="next"' in part:
+                    next_url = part.split(";")[0].strip(" <>")
+                    break
+            url = next_url
+
+        return all_data
+
+    async def token_to_user(self, token_info):
         """
-        Makes a "POST" request to `self.token_url`, with the parameters received as argument.
-
-        Returns:
-            the JSON response to the `token_url` the request as described in
-            https://www.rfc-editor.org/rfc/rfc6749#section-5.1
-
-        Called by :meth:`.authenticate` and :meth:`.refresh_user`.
+        Extended version that returns user info + Canvas groups + courses.
         """
+        if self.userdata_from_id_token:
+            # Use id token instead of exchanging access token with userinfo endpoint.
+            id_token = token_info.get("id_token", None)
+            if not id_token:
+                raise web.HTTPError(
+                    500,
+                    f"An id token was not returned: {token_info}\nPlease configure authenticator.userdata_url",
+                )
+            try:
+                # Here we parse the id token. Note that per OIDC spec (core v1.0 sect. 3.1.3.7.6) we can skip
+                # signature validation as the hub has obtained the tokens from the id provider directly (using
+                # https). Google suggests all token validation may be skipped assuming the provider is trusted.
+                # https://openid.net/specs/openid-connect-core-1_0.html#IDTokenValidation
+                # https://developers.google.com/identity/openid-connect/openid-connect#obtainuserinfo
+                return jwt.decode(
+                    id_token,
+                    audience=self.client_id,
+                    options=dict(
+                        verify_signature=False, verify_aud=True, verify_exp=True
+                    ),
+                )
+            except Exception as err:
+                raise web.HTTPError(
+                    500, f"Unable to decode id token: {id_token}\n{err}"
+                )
 
-        token_info = await self.httpfetch(
-            self.token_url,
-            method="POST",
-            headers=self.build_token_info_request_headers(),
-            body=urlencode(params).encode("utf-8"),
+        access_token = token_info["access_token"]
+        token_type = token_info["token_type"]
+
+        if not self.userdata_url:
+            raise ValueError(
+                "authenticator.userdata_url is missing. Please configure it."
+            )
+
+        url = url_concat(self.userdata_url, self.userdata_params)
+        if self.userdata_token_method == "url":
+            url = url_concat(url, dict(access_token=access_token))
+
+        user_resp = await self.httpfetch(
+            url,
+            "Fetching user info...",
+            method="GET",
+            headers=self.build_userdata_request_headers(access_token, token_type),
             validate_cert=self.validate_server_cert,
         )
+        user_info = json.loads(user_resp.body.decode("utf-8"))
+        
+        self_groups = await self.fetch_all_pages(self.groups_url, access_token, token_type)
+        courses = await self.fetch_all_pages(self.courses_url, access_token, token_type)
+        course_group_names = self.groups_from_canvas_courses(courses)
+        self_group_names = self.groups_from_canvas_groups(self_groups)
+        groups = course_group_names + self_group_names
+       
+    
+        return {
+            'user': user_info,
+            "groups": groups,
+            "courses": courses
+        }
 
-        if "error_description" in token_info:
-            raise web.HTTPError(
-                403,
-                f'An access token was not returned: {token_info["error_description"]}',
-            )
-        elif "access_token" not in token_info:
-            raise web.HTTPError(500, f"Bad response: {token_info}")
-
-        return token_info
-
-    async def get_canvas_items(self, access_token, url):
-        """
-        Get paginated items from Canvas.
-        https://canvas.instructure.com/doc/api/file.pagination.html
-        """
-
-        headers = dict(Authorization=f"Bearer {access_token}")
-        data = []
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=self.extra_params) as r:
-                if r.status != 200:
-                    raise Exception(
-                        f"error fetching items {url} -- {r.status} -- {r.text()}"
-                    )
-
-                data = await r.json()
-                if "next" in r.links.keys():
-                    url = r.links["next"]["url"]
-                    data += await self.get_canvas_items(access_token, url)
-
-        return data
-
-    async def get_courses(self, access_token):
-        """
-        Get list of active courses for the current user.
-
-        See https://canvas.instructure.com/doc/api/courses.html#method.courses.index
-        """
-        url = f"{self.canvas_url}/api/v1/courses"
-
-        data = await self.get_canvas_items(access_token, url)
-
-        return data
-
-    async def get_self_groups(self, token):
-        """
-        Get list of active groups for the current user.
-
-        See https://canvas.instructure.com/doc/api/groups.html#method.groups.index
-        """
-        url = f"{self.canvas_url}/api/v1/users/self/groups"
-
-        data = await self.get_canvas_items(token, url)
-
-        return data
 
     def format_jupyterhub_group(self, *terms):
         """
@@ -244,41 +263,62 @@ class CanvasOAuthenticator(GenericOAuthenticator):
             )
 
         return list(groups)
+    
+    def build_auth_state_dict(self, token_info, user_info):
+        # We know for sure the `access_token` key exists, otherwise we would have errored out already
+        access_token = token_info["access_token"]
 
-    async def update_auth_model(self, auth_model):
+        refresh_token = token_info.get("refresh_token", None)
+        id_token = token_info.get("id_token", None)
+        scope = token_info.get("scope", "")
+
+        if isinstance(scope, str):
+            scope = scope.split(" ")
+
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "id_token": id_token,
+            "scope": scope,
+            # Save the full token response
+            # These can be used for user provisioning in the Lab/Notebook environment.
+            "token_response": token_info,
+            # store the whole user model in auth_state too
+            self.user_auth_state_key: user_info.get("user", {}),
+            "courses": user_info.get("courses", []),
+            "groups": user_info.get("groups", []),
+        }
+
+    async def _token_to_auth_model(self, token_info):
         """
-        Ensure groups are set in auth_state for JupyterHub group management.
-        This is called after authenticate and before group sync.
+        Turn a token into the user's `auth_model` to be returned by :meth:`.authenticate`.
+
+        Common logic shared by :meth:`.authenticate` and :meth:`.refresh_user`.
         """
-        auth_model = await super().update_auth_model(auth_model)
 
-        access_token = auth_model["auth_state"]["access_token"]
+        # use the access_token to get userdata info
+        user_info = await self.token_to_user(token_info)
+        # extract the username out of the user_info dict and normalize it
+        username = self.user_info_to_username(user_info.get("user", {}))
+        username = self.normalize_username(username)
 
-        refresh_token = auth_model["auth_state"]["refresh_token"]
+        auth_state = self.build_auth_state_dict(token_info, user_info)
+        if isawaitable(auth_state):
+            auth_state = await auth_state
+        if self.modify_auth_state_hook is not None:
+            auth_state = await self._call_modify_auth_state_hook(auth_state)
+        # build the auth model to be read if authentication goes right
+        auth_model = {
+            "name": username,
+            "admin": True if username in self.admin_users else None,
+            "auth_state": auth_state,
+        }
 
-        refresh_token_params = self.build_refresh_token_request_params(refresh_token)
-        token_info = await self.get_refresh_token(refresh_token_params)
-        new_access_token = token_info.get("access_token")
-
-        if not new_access_token:
-            self.log.error("Failed to refresh access token.")
-            raise web.HTTPError(500, "Failed to refresh access token.")
-
-        courses = await self.get_courses(new_access_token)
-
-        # Preserve courses in auth_state for later use by the spawner
-        auth_model["auth_state"]["courses"] = courses
-
+        # update the auth_model with info to later authorize the user in
+        # check_allowed, such as admin status and group memberships
+        auth_model = await self.update_auth_model(auth_model)
         if self.manage_groups:
-            course_group_names = self.groups_from_canvas_courses(courses)
-
-            self_groups = await self.get_self_groups(new_access_token)
-            self_group_names = self.groups_from_canvas_groups(self_groups)
-
-            groups = course_group_names + self_group_names
-            auth_model["auth_state"][self.auth_state_groups_key] = groups
-        auth_model["auth_state"]["access_token"] = new_access_token
-        auth_model["auth_state"]["token_response"]["access_token"] = new_access_token
+            auth_model = await self._apply_managed_groups(auth_model)
         return auth_model
 
     def normalize_username(self, username):
